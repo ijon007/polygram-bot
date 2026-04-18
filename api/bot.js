@@ -162,11 +162,141 @@ async function getOpenPositions(user) {
   return Array.isArray(rows) ? rows : [];
 }
 
-async function getActivityTrades(user, limit) {
-  const rows = await fetchJson(
-    `${DATA_API}/activity?user=${encodeURIComponent(user)}&limit=${limit}&type=TRADE&sortBy=TIMESTAMP&sortDirection=DESC`
-  );
+async function getActivity(user, limit, type) {
+  const query = [
+    `user=${encodeURIComponent(user)}`,
+    `limit=${Number(limit) || 10}`,
+    "sortBy=TIMESTAMP",
+    "sortDirection=DESC",
+  ];
+  if (type) {
+    query.push(`type=${encodeURIComponent(type)}`);
+  }
+  const rows = await fetchJson(`${DATA_API}/activity?${query.join("&")}`);
   return Array.isArray(rows) ? rows : [];
+}
+
+function readActivityUsdSize(activity) {
+  const usdc = Number(activity?.usdcSize);
+  if (Number.isFinite(usdc)) return usdc;
+  const price = Number(activity?.price);
+  const size = Number(activity?.size);
+  if (Number.isFinite(price) && Number.isFinite(size)) return price * size;
+  return NaN;
+}
+
+function activityCashDelta(activity) {
+  const type = String(activity?.type || "").toUpperCase();
+  const usdc = readActivityUsdSize(activity);
+  if (!Number.isFinite(usdc)) return 0;
+
+  if (type === "TRADE") {
+    const side = String(activity?.side || "").toUpperCase();
+    if (side === "BUY") return -Math.abs(usdc);
+    if (side === "SELL") return Math.abs(usdc);
+    return 0;
+  }
+
+  if (type === "REDEEM" || type === "REWARD" || type === "CONVERSION") {
+    return usdc;
+  }
+
+  if (type === "SPLIT" || type === "MERGE") {
+    return usdc;
+  }
+
+  return 0;
+}
+
+function formatSignedUsd(n) {
+  const x = Number(n);
+  if (!Number.isFinite(x)) return "—";
+  if (x === 0) return formatUsd(0);
+  const sign = x > 0 ? "+" : "-";
+  return `${sign}${formatUsd(Math.abs(x))}`;
+}
+
+function formatHistoryLine(activity, idx) {
+  const type = String(activity?.type || "").toUpperCase();
+  const title = escapeTelegramHtml(activity?.title || "Market");
+  const outcome = activity?.outcome
+    ? ` (${escapeTelegramHtml(activity.outcome)})`
+    : "";
+  const timeText = formatTs(activity?.timestamp);
+  const usdc = readActivityUsdSize(activity);
+  const sharesText = Number.isFinite(Number(activity?.size))
+    ? formatShares(activity.size)
+    : "—";
+
+  if (type === "TRADE") {
+    const side = String(activity?.side || "").toUpperCase();
+    const isBuy = side === "BUY";
+    const action = isBuy ? "➕ Bought" : side === "SELL" ? "➖ Sold" : "🔁 Trade";
+    const signed = Number.isFinite(usdc)
+      ? formatSignedUsd(isBuy ? -Math.abs(usdc) : Math.abs(usdc))
+      : "—";
+    return (
+      `${idx + 1}. ${action} <b>${title}</b>${outcome}\n` +
+      `   💵 ${signed} · Shares: ${sharesText}\n` +
+      `   🕐 ${timeText}`
+    );
+  }
+
+  if (type === "REDEEM") {
+    const won = Number.isFinite(usdc) && usdc > 0;
+    const action = won ? "✅ Claimed" : "❌ Lost";
+    const value = won ? formatSignedUsd(usdc) : "—";
+    return (
+      `${idx + 1}. ${action} <b>${title}</b>\n` +
+      `   💵 ${value}\n` +
+      `   🕐 ${timeText}`
+    );
+  }
+
+  if (type === "REWARD") {
+    const value = Number.isFinite(usdc) ? formatSignedUsd(usdc) : "—";
+    return (
+      `${idx + 1}. 🎁 Reward <b>${title}</b>\n` +
+      `   💵 ${value}\n` +
+      `   🕐 ${timeText}`
+    );
+  }
+
+  if (type === "CONVERSION") {
+    const delta = activityCashDelta(activity);
+    const value = Number.isFinite(Number(delta)) ? formatSignedUsd(delta) : "—";
+    return (
+      `${idx + 1}. 🔄 Conversion <b>${title}</b>\n` +
+      `   💵 ${value}\n` +
+      `   🕐 ${timeText}`
+    );
+  }
+
+  if (type === "SPLIT" || type === "MERGE") {
+    const delta = activityCashDelta(activity);
+    const value = Number.isFinite(Number(delta)) ? formatSignedUsd(delta) : "—";
+    const action = type === "SPLIT" ? "🧩 Split" : "🧩 Merge";
+    return (
+      `${idx + 1}. ${action} <b>${title}</b>\n` +
+      `   💵 ${value}\n` +
+      `   🕐 ${timeText}`
+    );
+  }
+
+  return (
+    `${idx + 1}. ℹ️ ${escapeTelegramHtml(type || "ACTIVITY")} <b>${title}</b>\n` +
+    `   🕐 ${timeText}`
+  );
+}
+
+async function getPastDayPnl(user) {
+  const rows = await getActivity(user, 200);
+  const sinceSec = Math.floor(Date.now() / 1000) - 24 * 60 * 60;
+  return rows.reduce((sum, row) => {
+    const ts = Number(row?.timestamp);
+    if (!Number.isFinite(ts) || ts < sinceSec) return sum;
+    return sum + activityCashDelta(row);
+  }, 0);
 }
 
 async function sumClosedPositionsRealized(user) {
@@ -198,20 +328,26 @@ async function handleCommand(command, wallet) {
       `👋 <b>Welcome to the Polymarket helper bot!</b>\n\n` +
       `Data comes from Polymarket's public Data API (no chain RPC).\n\n` +
       `📌 <b>Commands</b>\n` +
-      `/balance — 📊 Total position value on Polymarket\n` +
+      `/balance — 📊 Portfolio snapshot (value + past day P&amp;L)\n` +
       `/positions — Open positions with price, size, and unrealized P&amp;L\n` +
-      `/history — Last 10 trades\n` +
+      `/history — Recent trades and claims\n` +
       `/pnl — Realized vs unrealized P&amp;L summary\n\n` +
       `Wallet: <code>${w}</code>`
     );
   }
 
   if (cmd === "/balance") {
-    const portfolio = await getPortfolioValue(wallet);
+    const [portfolio, pastDayPnl] = await Promise.all([
+      getPortfolioValue(wallet),
+      getPastDayPnl(wallet),
+    ]);
     return (
       `💰 <b>Portfolio</b>\n\n` +
-      `📊 <b>Total position value:</b> ${formatUsd(portfolio)}\n\n` +
-      `<i>From Data API <code>/value</code> — USDC sitting idle in the wallet is not included.</i>`
+      `📊 <b>Total position value:</b> ${formatUsd(portfolio)}\n` +
+      `🪙 <b>Available to trade (est.):</b> ${formatUsd(portfolio)}\n` +
+      `📈 <b>Past day P&amp;L:</b> ${formatSignedUsd(pastDayPnl)}\n\n` +
+      `<i><code>/value</code> returns position value only; available-to-trade cash is estimated from that same value.</i>\n` +
+      `<i>Past day P&amp;L is inferred from recent activity (trades + redeems/rewards).</i>`
     );
   }
 
@@ -239,29 +375,28 @@ async function handleCommand(command, wallet) {
   }
 
   if (cmd === "/history") {
-    const activity = await getActivityTrades(wallet, 10);
-    const trades = activity.filter((a) => a?.type === "TRADE");
-    if (trades.length === 0) {
-      return `📜 <b>Recent trades</b>\n\nNo recent TRADE activity found.`;
+    const activity = await getActivity(wallet, 40);
+    const supportedTypes = new Set([
+      "TRADE",
+      "REDEEM",
+      "REWARD",
+      "CONVERSION",
+      "SPLIT",
+      "MERGE",
+    ]);
+    const rows = activity.filter((a) =>
+      supportedTypes.has(String(a?.type || "").toUpperCase())
+    );
+
+    if (rows.length === 0) {
+      return `📜 <b>Recent activity</b>\n\nNo recent activity found.`;
     }
-    const lines = trades.map((a, i) => {
-      const title = escapeTelegramHtml(a.title || "Market");
-      const side = a.side === "SELL" ? "🔻 Sell" : "🔼 Buy";
-      const amt =
-        a.usdcSize !== undefined && a.usdcSize !== null
-          ? formatUsd(a.usdcSize)
-          : formatUsd(
-              a.price !== undefined && a.size !== undefined
-                ? Number(a.price) * Number(a.size)
-                : NaN
-            );
-      return (
-        `${i + 1}. <b>${title}</b>\n` +
-        `   ${side} · ${amt}\n` +
-        `   🕐 ${formatTs(a.timestamp)}`
-      );
-    });
-    return `📜 <b>Last trades</b> (up to 10)\n\n${lines.join("\n\n")}`;
+    const lines = rows.slice(0, 15).map((a, i) => formatHistoryLine(a, i));
+    const more =
+      rows.length > 15
+        ? `\n\n<i>…and ${rows.length - 15} more (showing latest 15).</i>`
+        : "";
+    return `📜 <b>Recent activity</b> (latest first)\n\n${lines.join("\n\n")}${more}`;
   }
 
   if (cmd === "/pnl") {
@@ -371,3 +506,9 @@ app.get("/api/bot", (_req, res) => {
 });
 
 module.exports = app;
+module.exports._internals = {
+  handleCommand,
+  getActivity,
+  getPastDayPnl,
+  formatHistoryLine,
+};
