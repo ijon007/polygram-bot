@@ -94,9 +94,28 @@ function escapeTelegramHtml(s) {
     .replace(/>/g, "&gt;");
 }
 
+/** Telegram sends `/cmd@BotName` in groups; strip @suffix so we still match. */
+function parseCommandToken(text) {
+  if (typeof text !== "string") return "";
+  const first = text.trim().split(/\s+/)[0] || "";
+  if (!first.startsWith("/")) return "";
+  const base = first.includes("@") ? first.slice(0, first.indexOf("@")) : first;
+  return base.toLowerCase();
+}
+
+function stripHtmlForTelegramFallback(html) {
+  return String(html)
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/p>/gi, "\n")
+    .replace(/<[^>]+>/g, "")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&");
+}
+
 async function sendTelegramMessage(token, chatId, text) {
   const url = `https://api.telegram.org/bot${encodeURIComponent(token)}/sendMessage`;
-  const body = {
+  const payloadHtml = {
     chat_id: chatId,
     text,
     parse_mode: "HTML",
@@ -105,14 +124,30 @@ async function sendTelegramMessage(token, chatId, text) {
   const res = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
+    body: JSON.stringify(payloadHtml),
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok || !data.ok) {
-    const desc = data.description || res.statusText || "sendMessage failed";
-    throw new Error(desc);
+  if (res.ok && data.ok) return data;
+
+  const desc = String(data.description || "");
+  const parseErr =
+    /parse entities|can't parse|parse mode/i.test(desc) ||
+    data.error_code === 400;
+  if (parseErr) {
+    const res2 = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: chatId,
+        text: stripHtmlForTelegramFallback(text),
+        disable_web_page_preview: true,
+      }),
+    });
+    const data2 = await res2.json().catch(() => ({}));
+    if (res2.ok && data2.ok) return data2;
+    throw new Error(data2.description || desc || "sendMessage failed");
   }
-  return data;
+  throw new Error(desc || res.statusText || "sendMessage failed");
 }
 
 async function getPortfolioValue(user) {
@@ -190,7 +225,7 @@ async function getUsdcBalanceOnPolygon(walletAddress) {
 }
 
 async function handleCommand(command, wallet) {
-  const cmd = (command || "").trim().split(/\s+/)[0]?.toLowerCase() || "";
+  const cmd = parseCommandToken(command);
 
   if (cmd === "/start") {
     const w = escapeTelegramHtml(wallet);
@@ -315,7 +350,11 @@ async function processUpdate(body) {
     throw new Error("WALLET_ADDRESS must be a valid 0x-prefixed address");
   }
 
-  const msg = body?.message || body?.edited_message;
+  const msg =
+    body?.message ||
+    body?.edited_message ||
+    body?.channel_post ||
+    body?.edited_channel_post;
   const chatId = msg?.chat?.id;
   const text = msg?.text;
 
@@ -323,7 +362,7 @@ async function processUpdate(body) {
     return { ok: true, skipped: true };
   }
 
-  if (typeof text !== "string" || !text.startsWith("/")) {
+  if (typeof text !== "string" || !text.trim().startsWith("/")) {
     await sendTelegramMessage(
       token,
       chatId,
@@ -360,8 +399,20 @@ function bindHandler(routePath) {
 bindHandler("/");
 bindHandler("/api/bot");
 
+function healthText() {
+  return (
+    "Polymarket Telegram bot\n\n" +
+    "Webhook: POST /api/bot (same payload as Telegram sendWebhook)\n" +
+    "Set BOT_TOKEN and WALLET_ADDRESS in Vercel env, then setWebhook to https://<your-domain>/api/bot"
+  );
+}
+
 app.get("/", (_req, res) => {
-  res.status(200).send("Polymarket Telegram bot — POST /api/bot");
+  res.status(200).type("text/plain").send(healthText());
+});
+
+app.get("/api/bot", (_req, res) => {
+  res.status(200).type("text/plain").send(healthText());
 });
 
 module.exports = app;
