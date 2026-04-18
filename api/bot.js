@@ -1,3 +1,4 @@
+const crypto = require("crypto");
 const express = require("express");
 
 const DATA_API = "https://data-api.polymarket.com";
@@ -146,6 +147,65 @@ async function sendTelegramMessage(token, chatId, text) {
     throw new Error(data2.description || desc || "sendMessage failed");
   }
   throw new Error(desc || res.statusText || "sendMessage failed");
+}
+
+function replaceAll(s, search, replacement) {
+  return String(s).split(search).join(replacement);
+}
+
+function buildClobL2Signature(secret, timestamp, method, requestPath, body) {
+  let message = `${timestamp}${method}${requestPath}`;
+  if (body !== undefined) {
+    message += body;
+  }
+  const base64Secret = Buffer.from(secret, "base64");
+  const hmac = crypto.createHmac("sha256", base64Secret);
+  const sig = hmac.update(message).digest("base64");
+  return replaceAll(replaceAll(sig, "+", "-"), "/", "_");
+}
+
+function getClobAuthConfig() {
+  const apiKey = getEnv("CLOB_API_KEY");
+  const secret = getEnv("CLOB_API_SECRET");
+  const passphrase = getEnv("CLOB_PASSPHRASE");
+  const address = getEnv("CLOB_ADDRESS");
+  if (!apiKey || !secret || !passphrase || !address) {
+    return null;
+  }
+  if (!isValidAddress(address)) {
+    return null;
+  }
+  return {
+    apiKey,
+    secret,
+    passphrase,
+    address,
+  };
+}
+
+async function getAvailableToTradeBalance() {
+  const auth = getClobAuthConfig();
+  if (!auth) return null;
+
+  const clobBase = getEnv("CLOB_API_BASE") || "https://clob.polymarket.com";
+  const requestPath = "/balance-allowance?asset_type=COLLATERAL";
+  const method = "GET";
+  const ts = Math.floor(Date.now() / 1000);
+  const sig = buildClobL2Signature(auth.secret, ts, method, requestPath);
+
+  const data = await fetchJson(`${clobBase}${requestPath}`, {
+    headers: {
+      POLY_ADDRESS: auth.address,
+      POLY_SIGNATURE: sig,
+      POLY_TIMESTAMP: `${ts}`,
+      POLY_API_KEY: auth.apiKey,
+      POLY_PASSPHRASE: auth.passphrase,
+    },
+  });
+
+  const balanceRaw = Number(data?.balance);
+  if (!Number.isFinite(balanceRaw)) return null;
+  return balanceRaw / 1e6;
 }
 
 async function getPortfolioValue(user) {
@@ -339,17 +399,24 @@ async function handleCommand(command, wallet) {
   }
 
   if (cmd === "/balance") {
-    const [portfolio, pastDayPnl] = await Promise.all([
+    const [positionValue, pastDayPnl, availableToTrade] = await Promise.all([
       getPortfolioValue(wallet),
       getPastDayPnl(wallet),
+      getAvailableToTradeBalance().catch(() => null),
     ]);
+    const hasLiveBalance = Number.isFinite(availableToTrade);
+    const available = hasLiveBalance ? availableToTrade : positionValue;
+    const totalPortfolio = positionValue + available;
     return (
       `💰 <b>Portfolio</b>\n\n` +
-      `📊 <b>Total position value:</b> ${formatUsd(portfolio)}\n` +
-      `🪙 <b>Available to trade (est.):</b> ${formatUsd(portfolio)}\n` +
+      `📊 <b>Total portfolio balance:</b> ${formatUsd(totalPortfolio)}\n` +
+      `🪙 <b>Available to trade${hasLiveBalance ? "" : " (est.)"}:</b> ${formatUsd(available)}\n` +
+      `📦 <b>Open positions value:</b> ${formatUsd(positionValue)}\n` +
       `📈 <b>Past day P&amp;L:</b> ${formatSignedUsd(pastDayPnl)}\n\n` +
-      `<i><code>/value</code> returns position value only; available-to-trade cash is estimated from that same value.</i>\n` +
-      `<i>Past day P&amp;L is inferred from recent activity (trades + redeems/rewards).</i>`
+      (hasLiveBalance
+        ? `<i>Available-to-trade cash is fetched from authenticated CLOB <code>/balance-allowance</code>.</i>\n`
+        : `<i>Set <code>CLOB_API_KEY</code>, <code>CLOB_API_SECRET</code>, <code>CLOB_PASSPHRASE</code>, and <code>CLOB_ADDRESS</code> to fetch true available-to-trade cash.</i>\n`) +
+      `<i>Open position value uses Data API <code>/value</code>. Past day P&amp;L is inferred from recent activity.</i>`
     );
   }
 
