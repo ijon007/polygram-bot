@@ -2,6 +2,7 @@
   "name": "polygram-bot",
   "version": "1.0.0",
   "private": true,
+  "main": "app.js",
   "engines": {
     "node": ">=18"
   },
