@@ -110,7 +110,9 @@ function stripHtmlForTelegramFallback(html) {
 }
 
 async function sendTelegramMessage(token, chatId, text) {
-  const url = `https://api.telegram.org/bot${encodeURIComponent(token)}/sendMessage`;
+  const telegramBase =
+    getEnv("TELEGRAM_API_BASE") || "https://api.telegram.org";
+  const url = `${telegramBase}/bot${encodeURIComponent(token)}/sendMessage`;
   const payloadHtml = {
     chat_id: chatId,
     text,
@@ -506,9 +508,3 @@ app.get("/api/bot", (_req, res) => {
 });
 
 module.exports = app;
-module.exports._internals = {
-  handleCommand,
-  getActivity,
-  getPastDayPnl,
-  formatHistoryLine,
-};
