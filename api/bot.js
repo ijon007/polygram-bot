@@ -1,10 +1,6 @@
 const express = require("express");
 
 const DATA_API = "https://data-api.polymarket.com";
-/** Polygon PoS — public RPC for ERC-20 USDC.e balance (no API key). */
-const POLYGON_RPC = "https://polygon-rpc.com";
-/** Bridged USDC on Polygon (USDC.e), commonly used on Polymarket. */
-const USDC_POLYGON = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
 
 const app = express();
 app.use(express.json());
@@ -193,37 +189,6 @@ async function sumClosedPositionsRealized(user) {
   return total;
 }
 
-function padHexTo32(addr) {
-  const a = addr.replace(/^0x/i, "").toLowerCase();
-  return a.padStart(64, "0");
-}
-
-async function getUsdcBalanceOnPolygon(walletAddress) {
-  const data = `0x70a08231${padHexTo32(walletAddress)}`;
-  const payload = {
-    jsonrpc: "2.0",
-    id: 1,
-    method: "eth_call",
-    params: [{ to: USDC_POLYGON, data }, "latest"],
-  };
-  const res = await fetch(POLYGON_RPC, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  const j = await res.json().catch(() => ({}));
-  const hex = j?.result;
-  if (!res.ok || typeof hex !== "string" || !/^0x[0-9a-f]+$/i.test(hex)) {
-    throw new Error(
-      j?.error?.message || "Could not read USDC balance from Polygon RPC"
-    );
-  }
-  const raw = BigInt(hex);
-  const usdc = Number(raw) / 1e6;
-  if (!Number.isFinite(usdc)) throw new Error("Invalid USDC balance response");
-  return usdc;
-}
-
 async function handleCommand(command, wallet) {
   const cmd = parseCommandToken(command);
 
@@ -231,9 +196,9 @@ async function handleCommand(command, wallet) {
     const w = escapeTelegramHtml(wallet);
     return (
       `👋 <b>Welcome to the Polymarket helper bot!</b>\n\n` +
-      `I read your linked wallet on-chain and from Polymarket's public data API.\n\n` +
+      `Data comes from Polymarket's public Data API (no chain RPC).\n\n` +
       `📌 <b>Commands</b>\n` +
-      `/balance — 💵 USDC (wallet) + 📊 portfolio value\n` +
+      `/balance — 📊 Total position value on Polymarket\n` +
       `/positions — Open positions with price, size, and unrealized P&amp;L\n` +
       `/history — Last 10 trades\n` +
       `/pnl — Realized vs unrealized P&amp;L summary\n\n` +
@@ -243,20 +208,10 @@ async function handleCommand(command, wallet) {
 
   if (cmd === "/balance") {
     const portfolio = await getPortfolioValue(wallet);
-    let usdc;
-    try {
-      usdc = await getUsdcBalanceOnPolygon(wallet);
-    } catch (e) {
-      const m = e instanceof Error ? e.message : String(e);
-      throw new Error(`Could not read USDC on Polygon: ${m}`);
-    }
     return (
-      `💰 <b>Balance &amp; portfolio</b>\n\n` +
-      `💵 <b>USDC on Polygon (wallet):</b> ${formatUsd(usdc)}\n` +
-      `📊 <b>Position value (Polymarket):</b> ${formatUsd(portfolio)}\n\n` +
-      `<i>USDC is read via public Polygon RPC (USDC.e ${escapeTelegramHtml(
-        `${USDC_POLYGON.slice(0, 10)}…`
-      )}).</i>`
+      `💰 <b>Portfolio</b>\n\n` +
+      `📊 <b>Total position value:</b> ${formatUsd(portfolio)}\n\n` +
+      `<i>From Data API <code>/value</code> — USDC sitting idle in the wallet is not included.</i>`
     );
   }
 
